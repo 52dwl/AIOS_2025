@@ -6,3 +6,7 @@ data/**
 ./**/.db
 ./**/.env
 *.
+./**/__pycache__/**
+./**/messages/**
+./**/mem0.db
+./**/db/**
