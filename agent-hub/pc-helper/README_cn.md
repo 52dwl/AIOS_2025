@@ -1,13 +1,16 @@
-# Hello World 节点
+# 电脑端文件数据助手
 
-一个简单的 MOFA 节点，演示基本的回声/透传功能。该节点接收输入数据并原样返回，作为 MOFA 框架的模板和测试工具。
+一个基于 MOFA 框架构建的综合性 PC 助手代理。该代理通过分析用户请求、利用内存功能以及通过 MCP 服务执行适当的工具来提供智能任务辅助。
 
 ## 功能特性
 
-- **回声功能**：原样返回输入数据
+- **客户经理Agent（AM）**：分析用户意图，澄清需求，并管理任务执行流程
+- **执行层Agent**：处理澄清后的用户意图并执行适当的工具
+- **经验管理**：使用 mem0 进行持久化内存存储和用户交互检索
+- **MCP 集成**：连接到 MCP（模型控制平面）服务以访问各种工具
+- **消息持久化**：存储对话历史以保留上下文
+- **摘要功能**：总结任务结果并将其存储为经验
 - **MOFA 框架集成**：使用标准 MOFA 代理模式构建
-- **简单测试**：非常适合验证 MOFA 框架设置和数据流连接
-- **最小依赖**：轻量级实现，外部依赖最少
 
 ## 安装
 
@@ -19,26 +22,32 @@ pip install -e .
 
 ## 配置
 
-该节点不需要额外的配置文件。它使用标准的 MOFA 代理配置模式。
+PC Helper 代理使用位于 `helper/config` 目录中的多个配置文件：
+
+- `agent_am.yml`：代理管理器组件的配置
+- `agent_executor.yml`：代理执行器组件的配置
+- `memory_config.yml`：内存管理系统的配置
+
+这些文件定义了每个组件的提示词、行为和设置。
 
 ### 输入参数
 
 | 参数名 | 类型 | 必需 | 描述 |
 |--------|------|------|------|
-| `query` | string | 是 | 要回传的输入数据 |
+| `user_input` | string | 是 | 由代理处理的用户请求或查询
 
 ### 输出参数
 
 | 参数名 | 类型 | 描述 |
 |--------|------|------|
-| `hello_world_result` | string | 原样返回的输入数据 |
+| `am_result` | string | 用户请求的处理结果
 
 ## 使用示例
 
 ### 基本数据流配置
 
 ```yaml
-# hello_world_dataflow.yml
+# pc_helper_dataflow.yml
 nodes:
   - id: terminal-input
     build: pip install -e ../../node-hub/terminal-input
@@ -46,55 +55,86 @@ nodes:
     outputs:
       - data
     inputs:
-      agent_response: life-helper-am-agent/hello_world_result
-  - id: life-helper-am-agent
-    build: pip install -e ../../agent-hub/life-helper-am
-    path: life-helper-am
+      agent_response: pc-helper/am_result
+  - id: pc-helper
+    build: pip install -e .
+    path: helper
     outputs:
-      - hello_world_result
+      - am_result
     inputs:
-      query: terminal-input/data
+      user_input: terminal-input/data
     env:
       IS_DATAFLOW_END: true
       WRITE_LOG: true
+      LLM_API_KEY: your_api_key_here
+      MCP_URL: http://127.0.0.1:8000/sse
+      USER_ID: default_user
 ```
 
-### 运行节点
+### 运行代理
 
 1. **启动 MOFA 框架：**
    ```bash
    dora up
    ```
 
-2. **构建并启动数据流：**
+2. **确保 MCP 服务正在运行：**
+   PC Helper 代理需要 MCP 服务在配置的 URL 上可用。
+
+3. **构建并启动数据流：**
    ```bash
-   dora build hello_world_dataflow.yml
-   dora start hello_world_dataflow.yml
+   dora build pc_helper_dataflow.yml
+   dora start pc_helper_dataflow.yml
    ```
 
-3. **发送输入数据：**
-   使用 terminal-input 或任何 MOFA 输入方法向 `query` 参数发送数据。
+4. **发送输入数据：**
+   使用 terminal-input 或任何 MOFA 输入方法向 `user_input` 参数发送用户请求。
 
 ## 代码示例
 
-核心功能在 `main.py` 中实现：
+核心功能在 `helper/main.py` 中实现：
 
 ```python
-from mofa.agent_build.base.base_agent import MofaAgent, run_agent
+import os
+from mofa.agent_build.base.base_agent import run_agent, MofaAgent
+from .utils import create_openai_client
+from .mcp_client import PersistentMCPClient
+from .mem0_client import Mem0Client
+from .agent_executor import AgentExecutor
+from .agent_am import AgentAM
 
 @run_agent
 def run(agent: MofaAgent):
-    # 接收输入参数
-    user_query = agent.receive_parameter('query')
+    user_input = agent.receive_parameter("user_input") or ""
+    if user_input.strip() == "":
+        return
+    user_id = os.getenv("USER_ID", "pc-helper")
+
+    # 创建 OpenAI 客户端
+    client = create_openai_client()
     
-    # 发送输出（原样回传输入）
-    agent.send_output(
-        agent_output_name='hello_world_result', 
-        agent_result=user_query
-    )
+    # 初始化内存客户端
+    mem_client = Mem0Client()
+    # ... 内存初始化代码 ...
+
+    # 初始化 MCP 客户端以访问工具
+    mcp_url = os.getenv("MCP_URL", "http://127.0.0.1:8000/sse")
+    p_mcp = PersistentMCPClient(url=mcp_url, agent=agent)
+    # ... MCP 客户端初始化 ...
+
+    # 初始化代理组件
+    tools = p_mcp.list_tools()
+    executor = AgentExecutor(client, mem_client, p_mcp, tools, agent=agent)
+    am = AgentAM(client, mem_client, executor, None, agent=agent)
+
+    # 处理用户输入并返回结果
+    res = am.run(user_input, user_id=user_id)
+    out = res.get("am_result") if isinstance(res, dict) else str(res)
+    
+    agent.send_output(agent_output_name="am_result", agent_result=out)
 
 def main():
-    agent = MofaAgent(agent_name='life-helper-am')
+    agent = MofaAgent(agent_name="pc-helper")
     run(agent=agent)
 
 if __name__ == "__main__":
@@ -103,15 +143,19 @@ if __name__ == "__main__":
 
 ## 依赖项
 
-- **pyarrow** (>= 5.0.0)：用于数据序列化和 arrow 格式支持
-- **mofa**：MOFA 框架（在 MOFA 环境中自动可用）
+- **mofa**：MOFA 框架（代理开发的核心框架）
+- **mem0**：用于持久化内存存储和检索
+- **mcp**：模型控制平面客户端，用于访问工具
+- **openai**：用于语言模型 API 访问
+- **pyarrow**：用于数据序列化和 arrow 格式支持
 
 ## 使用场景
 
-- **框架测试**：验证 MOFA 设置和数据流连接
-- **模板参考**：作为新 MOFA 节点的起点
-- **调试工具**：在复杂管道中测试数据流和参数传递
-- **学习工具**：理解基本的 MOFA 节点结构和模式
+- **个人助手**：为各种 PC 相关任务提供智能辅助
+- **工具集成**：作为用户和通过 MCP 可用的各种工具之间的桥梁
+- **内存增强任务**：使用持久化内存执行具有上下文感知的任务
+- **任务编排**：基于用户请求管理和执行多步骤任务
+- **框架示例**：展示使用 MOFA 框架的高级代理架构
 
 ## 贡献
 

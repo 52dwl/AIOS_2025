@@ -1,13 +1,16 @@
-# Hello World Node
+# PC Helper Agent
 
-A simple MOFA node that demonstrates the basic echo/passthrough functionality. This node receives input and returns it unchanged, serving as a template and testing utility for the MOFA framework.
+A comprehensive PC Helper Agent built on the MOFA framework. This agent provides intelligent task assistance by analyzing user requests, leveraging memory capabilities, and executing appropriate tools through the MCP service.
 
 ## Features
 
-- **Echo Functionality**: Returns input data unchanged
+- **Agent Manager (AM)**: Analyzes user intentions, clarifies requirements, and manages task execution flow
+- **Agent Executor**: Processes clarified user intentions and executes appropriate tools
+- **Memory Management**: Uses mem0 for persistent memory storage and retrieval of user interactions
+- **MCP Integration**: Connects to the MCP (Model Control Plane) service to access various tools
+- **Message Persistence**: Stores conversation history for context preservation
+- **Summarization**: Summarizes task outcomes and stores them as experiences
 - **MOFA Framework Integration**: Built using the standard MOFA agent pattern
-- **Simple Testing**: Ideal for verifying MOFA framework setup and dataflow connectivity
-- **Minimal Dependencies**: Lightweight implementation with minimal external dependencies
 
 ## Installation
 
@@ -19,26 +22,32 @@ pip install -e .
 
 ## Configuration
 
-This node requires no additional configuration files. It uses the standard MOFA agent configuration pattern.
+The PC Helper Agent uses multiple configuration files located in the `helper/config` directory:
+
+- `agent_am.yml`: Configuration for the Agent Manager component
+- `agent_executor.yml`: Configuration for the Agent Executor component
+- `memory_config.yml`: Configuration for the memory management system
+
+These files define prompts, behaviors, and settings for each component.
 
 ### Input Parameters
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `query` | string | Yes | The input data to be echoed back |
+| `user_input` | string | Yes | The user's request or query to be processed by the agent
 
 ### Output Parameters
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `hello_world_result` | string | The echoed input data unchanged |
+| `am_result` | string | The processed result of the user's request
 
 ## Usage Example
 
 ### Basic Dataflow Configuration
 
 ```yaml
-# hello_world_dataflow.yml
+# pc_helper_dataflow.yml
 nodes:
   - id: terminal-input
     build: pip install -e ../../node-hub/terminal-input
@@ -46,55 +55,86 @@ nodes:
     outputs:
       - data
     inputs:
-      agent_response: life-helper-am-agent/hello_world_result
-  - id: life-helper-am-agent
-    build: pip install -e ../../agent-hub/life-helper-am
-    path: life-helper-am
+      agent_response: pc-helper/am_result
+  - id: pc-helper
+    build: pip install -e .
+    path: helper
     outputs:
-      - hello_world_result
+      - am_result
     inputs:
-      query: terminal-input/data
+      user_input: terminal-input/data
     env:
       IS_DATAFLOW_END: true
       WRITE_LOG: true
+      LLM_API_KEY: your_api_key_here
+      MCP_URL: http://127.0.0.1:8000/sse
+      USER_ID: default_user
 ```
 
-### Running the Node
+### Running the Agent
 
 1. **Start the MOFA framework:**
    ```bash
    dora up
    ```
 
-2. **Build and start the dataflow:**
+2. **Ensure MCP service is running:**
+   The PC Helper Agent requires the MCP service to be available at the configured URL.
+
+3. **Build and start the dataflow:**
    ```bash
-   dora build hello_world_dataflow.yml
-   dora start hello_world_dataflow.yml
+   dora build pc_helper_dataflow.yml
+   dora start pc_helper_dataflow.yml
    ```
 
-3. **Send input data:**
-   Use terminal-input or any MOFA input method to send data to the `query` parameter.
+4. **Send input data:**
+   Use terminal-input or any MOFA input method to send user requests to the `user_input` parameter.
 
 ## Code Example
 
-The core functionality is implemented in `main.py`:
+The core functionality is implemented in `helper/main.py`:
 
 ```python
-from mofa.agent_build.base.base_agent import MofaAgent, run_agent
+import os
+from mofa.agent_build.base.base_agent import run_agent, MofaAgent
+from .utils import create_openai_client
+from .mcp_client import PersistentMCPClient
+from .mem0_client import Mem0Client
+from .agent_executor import AgentExecutor
+from .agent_am import AgentAM
 
 @run_agent
 def run(agent: MofaAgent):
-    # Receive input parameter
-    user_query = agent.receive_parameter('query')
+    user_input = agent.receive_parameter("user_input") or ""
+    if user_input.strip() == "":
+        return
+    user_id = os.getenv("USER_ID", "pc-helper")
+
+    # Create OpenAI client
+    client = create_openai_client()
     
-    # Send output (echo the input unchanged)
-    agent.send_output(
-        agent_output_name='hello_world_result', 
-        agent_result=user_query
-    )
+    # Initialize memory client
+    mem_client = Mem0Client()
+    # ... memory initialization code ...
+
+    # Initialize MCP client for tool access
+    mcp_url = os.getenv("MCP_URL", "http://127.0.0.1:8000/sse")
+    p_mcp = PersistentMCPClient(url=mcp_url, agent=agent)
+    # ... MCP client initialization ...
+
+    # Initialize agent components
+    tools = p_mcp.list_tools()
+    executor = AgentExecutor(client, mem_client, p_mcp, tools, agent=agent)
+    am = AgentAM(client, mem_client, executor, None, agent=agent)
+
+    # Process user input and return result
+    res = am.run(user_input, user_id=user_id)
+    out = res.get("am_result") if isinstance(res, dict) else str(res)
+    
+    agent.send_output(agent_output_name="am_result", agent_result=out)
 
 def main():
-    agent = MofaAgent(agent_name='life-helper-am')
+    agent = MofaAgent(agent_name="pc-helper")
     run(agent=agent)
 
 if __name__ == "__main__":
@@ -104,15 +144,19 @@ if __name__ == "__main__":
 
 ## Dependencies
 
-- **pyarrow** (>= 5.0.0): For data serialization and arrow format support
-- **mofa**: MOFA framework (automatically available in MOFA environment)
+- **mofa**: MOFA framework (core framework for agent development)
+- **mem0**: For persistent memory storage and retrieval
+- **mcp**: Model Control Plane client for accessing tools
+- **openai**: For language model API access
+- **pyarrow**: For data serialization and arrow format support
 
 ## Use Cases
 
-- **Framework Testing**: Verify MOFA setup and dataflow connectivity
-- **Template Reference**: Use as a starting point for new MOFA nodes
-- **Debugging**: Test data flow and parameter passing in complex pipelines
-- **Learning**: Understand basic MOFA node structure and patterns
+- **Personal Assistant**: Provide intelligent assistance for various PC-related tasks
+- **Tool Integration**: Serve as a bridge between users and various tools available through MCP
+- **Memory-Enabled Tasks**: Perform tasks with context awareness using persistent memory
+- **Task Orchestration**: Manage and execute multi-step tasks based on user requests
+- **Framework Example**: Demonstrate advanced agent architecture using MOFA framework
 
 ## Contributing
 
